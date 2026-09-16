@@ -1,25 +1,26 @@
-"""Result store: archive oversized tool results, index stubs inline.
+"""Result store: offload old tool results, preview stubs inline.
 
-Pins the 2026-09-13 context-inflation fix (216K-char agent views): tool
-results above the threshold become ``[已归档 tr-...]`` stubs in context;
-originals are retrievable via the ``get_tool_result`` tool with paging.
+Pins the 2026-09-13 context-inflation fix (216K-char agent views) and the
+2026-09-16 v2 realignment to Anthropic tool-result-clearing semantics:
+age-first offloading (old results cleared regardless of size, tiny results
+stay verbatim), stubs carry a preview, store is a bounded LRU with disk
+compaction.
 """
 
 from __future__ import annotations
 
-import json
 from pathlib import Path
 
 import pytest
 
 from nanobot.tools.result_store import (
-    ResultStore,
     GetToolResultTool,
+    ResultStore,
     compress_tool_results,
 )
 
-
 BIG = "x" * 8_000
+MID = "m" * 1_500   # old default (6000) would NOT archive this; v2 does
 SMALL = "ok"
 
 
@@ -63,6 +64,9 @@ def test_persistence_roundtrip(tmp_path: Path) -> None:
     assert s2.get(idx, limit=100) == "persist me"
 
 
+# ── v2: age-first + preview stubs ─────────────────────────────────────────
+
+
 def test_compress_replaces_old_large_results(store: ResultStore, monkeypatch: pytest.MonkeyPatch) -> None:
     from nanobot.tools import result_store as rs_mod
     monkeypatch.setattr(rs_mod, "get_result_store", lambda: store)
@@ -72,16 +76,15 @@ def test_compress_replaces_old_large_results(store: ResultStore, monkeypatch: py
             {"id": "t1", "type": "function", "function": {"name": "web_fetch", "arguments": "{}"}},
             {"id": "t2", "type": "function", "function": {"name": "exec", "arguments": "{}"}},
         ]},
-        {"role": "tool", "tool_call_id": "t1", "content": BIG},      # old + big → archived
-        {"role": "tool", "tool_call_id": "t2", "content": BIG},      # newest 3 kept... see next msg
+        {"role": "tool", "tool_call_id": "t1", "content": BIG},
+        {"role": "tool", "tool_call_id": "t2", "content": BIG},
         {"role": "tool", "tool_call_id": "t3", "content": BIG},
-        {"role": "tool", "tool_call_id": "t4", "content": BIG},      # recent, kept verbatim
-        {"role": "tool", "tool_call_id": "t5", "content": SMALL},    # recent, kept verbatim
+        {"role": "tool", "tool_call_id": "t4", "content": BIG},  # recent, kept verbatim
+        {"role": "tool", "tool_call_id": "t5", "content": SMALL},  # recent, kept verbatim
     ]
-    out = compress_tool_results(msgs, keep_recent=3, threshold=6_000)
-    # t1/t2 are outside keep_recent(3): t1 archived; t2 is index 3, keep_recent covers last 3 (t3? count: positions of tools = [2,3,4,5,6]; last 3 = [4,5,6] → archivable [2,3] → t1,t2 archived
-    assert "[已归档 tr-" in out[2]["content"]
-    assert "[已归档 tr-" in out[3]["content"]
+    out = compress_tool_results(msgs, keep_recent=3, inline_max=1_000)
+    assert out[2]["content"].startswith("[已归档 tr-")
+    assert out[3]["content"].startswith("[已归档 tr-")
     assert out[4]["content"] == BIG
     assert out[5]["content"] == BIG
     assert out[6]["content"] == SMALL
@@ -92,13 +95,52 @@ def test_compress_replaces_old_large_results(store: ResultStore, monkeypatch: py
     assert store.get("tr-" + idx, limit=100_000) == BIG
 
 
+def test_age_first_midsize_archived(store: ResultStore, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Old results are cleared regardless of size (official semantics):
+    1500 chars would pass the old 6000 threshold — v2 offloads it."""
+    from nanobot.tools import result_store as rs_mod
+    monkeypatch.setattr(rs_mod, "get_result_store", lambda: store)
+    msgs = [
+        {"role": "tool", "tool_call_id": "t1", "content": MID},
+        {"role": "tool", "tool_call_id": "t2", "content": MID},
+    ]
+    out = compress_tool_results(msgs, keep_recent=0, inline_max=1_000)
+    assert out[0]["content"].startswith("[已归档 tr-")
+    assert out[1]["content"].startswith("[已归档 tr-")
+
+
+def test_stub_carries_preview(store: ResultStore, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Hybrid strategy: the stub previews the head of the content so most
+    retrievals never happen."""
+    from nanobot.tools import result_store as rs_mod
+    monkeypatch.setattr(rs_mod, "get_result_store", lambda: store)
+    content = "QUERY_RESULT_DISK_USAGE_42\n" + "z" * 9_000
+    msgs = [{"role": "tool", "tool_call_id": "t1", "content": content}]
+    out = compress_tool_results(msgs, keep_recent=0, inline_max=1_000)
+    assert "QUERY_RESULT_DISK_USAGE_42" in out[0]["content"]
+    assert "\n" not in out[0]["content"]  # preview is one line
+    assert len(out[0]["content"]) < 400
+
+
+def test_str_prefix_not_mistaken_for_stub(store: ResultStore, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Regression: 'tr-' substring detection let 'str-…' outputs slip
+    through unarchived (2026-09-16 review P2). Detection is now startswith."""
+    from nanobot.tools import result_store as rs_mod
+    monkeypatch.setattr(rs_mod, "get_result_store", lambda: store)
+    msgs = [
+        {"role": "tool", "tool_call_id": "t1", "content": "str-object: " + "y" * 9_000},
+    ]
+    out = compress_tool_results(msgs, keep_recent=0, inline_max=1_000)
+    assert out[0]["content"].startswith("[已归档 tr-")
+
+
 def test_compress_idempotent_on_stubs() -> None:
-    stub = "[已归档 tr-abc1234567 | 原文 8,000 字符 | 调用 get_tool_result(index=\"tr-abc1234567\")]"
+    stub = "[已归档 tr-abc1234567 | 原文 8,000 字符 | 预览: x | 调用 get_tool_result(index=\"tr-abc1234567\")]"
     msgs = [
         {"role": "tool", "tool_call_id": "t1", "content": stub},
         {"role": "tool", "tool_call_id": "t2", "content": "x"},
     ]
-    out = compress_tool_results(msgs, keep_recent=0, threshold=10)
+    out = compress_tool_results(msgs, keep_recent=0, inline_max=10)
     assert out is msgs or out == msgs  # stub not re-processed
 
 
@@ -107,8 +149,57 @@ def test_small_results_untouched() -> None:
         {"role": "tool", "tool_call_id": "t1", "content": SMALL},
         {"role": "tool", "tool_call_id": "t2", "content": "also small"},
     ]
-    out = compress_tool_results(msgs, keep_recent=0, threshold=6_000)
+    out = compress_tool_results(msgs, keep_recent=0, inline_max=1_000)
     assert out is msgs
+
+
+# ── v2: bounded LRU + disk compaction ─────────────────────────────────────
+
+
+def test_lru_eviction(tmp_path: Path) -> None:
+    s = ResultStore(store_dir=tmp_path / "lru", max_entries=3)
+    first = s.put("first" * 10)
+    s.put("second" * 10)
+    s.put("third" * 10)
+    s.put("fourth" * 10)  # evicts `first`
+    assert s.get(first).startswith("Error: index")  # evicted → friendly error
+    assert "fourth" in s.get(s.put("fourth" * 10))  # newest still alive
+
+
+def test_lru_get_refreshes_recency(tmp_path: Path) -> None:
+    s = ResultStore(store_dir=tmp_path / "lru2", max_entries=2)
+    a = s.put("aaa")
+    b = s.put("bbb")
+    _ = s.get(a)          # refresh a → b becomes coldest
+    s.put("ccc")      # evicts b, keeps a
+    assert "aaa" in s.get(a)
+    assert s.get(b).startswith("Error: index")
+
+
+def test_disk_compact_under_budget(tmp_path: Path) -> None:
+    s = ResultStore(store_dir=tmp_path / "cmp", max_entries=2, max_total_bytes=500)
+    s.put("x" * 300)
+    s.put("y" * 300)
+    s.put("z" * 300)  # triggers eviction + (eventually) compaction
+    f = tmp_path / "cmp" / "store.jsonl"
+    if f.exists():
+        # compaction rewrites to the live set — at most the budget worth of
+        # content entries (2 × 300 chars) plus json overhead tolerance
+        assert f.stat().st_size < 2_000
+
+
+def test_eviction_survives_restart(tmp_path: Path) -> None:
+    """Replay keeps the newest max_entries entries; older disk rows drop
+    with the same friendly-error degradation (in-memory and replay agree)."""
+    d = tmp_path / "restart"
+    s1 = ResultStore(store_dir=d, max_entries=2)
+    oldest = s1.put("oldest")
+    s1.put("second")
+    s1.put("third")  # in-memory evicts 'oldest'
+    assert s1.get(oldest).startswith("Error: index")
+    s2 = ResultStore(store_dir=d, max_entries=2)  # replay keeps newest 2
+    assert s2.get(oldest).startswith("Error: index")
+    assert "third" in s2.get(s2.put("third"))  # dedup → same index, alive
 
 
 async def test_get_tool_result_tool(store: ResultStore, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -125,7 +216,7 @@ async def test_get_tool_result_tool(store: ResultStore, monkeypatch: pytest.Monk
 
 
 def test_history_context_archives_oversized_content(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    """Groupchat views must not accumulate >threshold text blobs."""
+    """Groupchat views must not accumulate >inline_max text blobs."""
     from nanobot.groupchat.history.context import HistoryContext
     from nanobot.tools import result_store as rs_mod
 
@@ -138,9 +229,11 @@ def test_history_context_archives_oversized_content(tmp_path: Path, monkeypatch:
     big = "历史大块文本" + "Z" * 9_000
     ctx.add_message("Harper", big)
     stored = ctx.messages[-1]["content"]
-    assert "[已归档 tr-" in stored and len(stored) < 400
+    assert stored.startswith("[已归档 tr-") and len(stored) < 600
     view = ctx.view_for("A")
-    assert len(view[-1]["content"]) < 400
+    assert len(view[-1]["content"]) < 600
+    # preview inside the stub
+    assert "历史大块文本" in stored
     # original retrievable
     idx = stored.split("tr-")[1].split()[0]
     assert store.get("tr-" + idx, limit=100_000) == big

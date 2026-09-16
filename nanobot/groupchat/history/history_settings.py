@@ -89,7 +89,10 @@ _DEFAULTS: dict[str, Any] = {
     # in ~/.nanobot/tool_results/ and come back via the get_tool_result tool.
     "result_store": {
         "enabled": True,
-        "inline_threshold_chars": 6_000,
+        # v2 (2026-09-16): <= this stays verbatim; older results beyond
+        # this are offloaded regardless of size (official tool-result-
+        # clearing semantics). Legacy key inline_threshold_chars honoured.
+        "inline_max_chars": 1_000,
         "keep_recent": 3,
     },
 }
@@ -248,8 +251,12 @@ def result_store_enabled() -> bool:
     return bool(_load().get("result_store", {}).get("enabled", True))
 
 
-def result_store_inline_threshold() -> int:
-    return int(_load().get("result_store", {}).get("inline_threshold_chars", 6_000))
+def result_store_inline_max() -> int:
+    rs = _load().get("result_store", {})
+    v = rs.get("inline_max_chars")
+    if v is None:
+        v = rs.get("inline_threshold_chars", 1_000)  # legacy key compat
+    return int(v)
 
 
 def result_store_keep_recent() -> int:

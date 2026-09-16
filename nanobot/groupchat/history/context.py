@@ -248,13 +248,13 @@ class HistoryContext:
         try:
             from nanobot.groupchat.history.history_settings import (  # noqa: PLC0415
                 result_store_enabled,
-                result_store_inline_threshold,
+                result_store_inline_max,
             )
             if (
                 result_store_enabled()
                 and isinstance(content, str)
-                and len(content) > result_store_inline_threshold()
-                and "[已归档 tr-" not in content[:40]
+                and len(content) > result_store_inline_max()
+                and not content.startswith("[已归档")
             ):
                 from nanobot.tools.result_store import get_result_store  # noqa: PLC0415
                 store = get_result_store()
