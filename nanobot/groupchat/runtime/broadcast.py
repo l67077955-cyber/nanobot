@@ -8,7 +8,6 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
-import json as _json
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -285,14 +284,11 @@ class BroadcastOrchestrator:
         self.non_leader_agents = [a for a in agents if a != self.leader_name] if self.leader_name else list(agents)
         self.total = len(self.exec_agents)
 
-        _gc_settings_path = Path.home() / ".nanobot" / "groupchat_settings.json"
-        _gc_defaults = {"search_initial": 2, "search_earn_interval": 4, "allocate_timeout": 15, "call_timeout": 90, "conv_keep_turns": 3}
-        self.gc_settings = dict(_gc_defaults)
-        if _gc_settings_path.exists():
-            try:
-                self.gc_settings.update(_json.loads(_gc_settings_path.read_text()))
-            except Exception:
-                pass
+        # Defaults + user overrides via the cached gc_settings module
+        # (was: raw path + inline json parse; see 2026-09-16 review).
+        from nanobot.groupchat.runtime.gc_settings import load_dict  # noqa: PLC0415
+
+        self.gc_settings = load_dict()
 
         self.pool: Any = None
         self.tracker: AgentStatusTracker = None # type: ignore

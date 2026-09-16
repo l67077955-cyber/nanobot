@@ -140,15 +140,12 @@ async def run_loop(engine: Any) -> None:
             # ── 关键修复：给 broadcast_round 加上全局超时保护 ──
             # 防止某一轮卡死导致整个群聊永久阻塞。
             # 可配置：groupchat_settings.json 的 "global_timeout"（秒，默认 600）。
-            _gt = 600.0
             try:
-                import json as _json
-                from pathlib import Path as _P
-                _gc_cfg = _P.home() / ".nanobot" / "groupchat_settings.json"
-                if _gc_cfg.exists():
-                    _gt = float(_json.loads(_gc_cfg.read_text(encoding="utf-8")).get("global_timeout", 600))
+                from nanobot.groupchat.runtime.gc_settings import global_timeout  # noqa: PLC0415
+
+                _gt = global_timeout()
             except Exception:
-                pass
+                _gt = 600.0
             round_result = await broadcast_round(
                 speak_order,
                 engine,

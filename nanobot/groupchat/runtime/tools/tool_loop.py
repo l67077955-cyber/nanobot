@@ -263,10 +263,9 @@ async def tool_loop(
     # failure via _stream_call's existing guards.
     if not _can_stream and hasattr(provider, "chat_stream"):
         try:
-            import json as _json
-            from pathlib import Path as _P
-            _gc = _P.home() / ".nanobot" / "groupchat_settings.json"
-            if _gc.exists() and _json.loads(_gc.read_text(encoding="utf-8")).get("stream_llm_calls", False):
+            from nanobot.groupchat.runtime.gc_settings import stream_llm_calls  # noqa: PLC0415
+
+            if stream_llm_calls():
                 async def on_content_delta(_delta: str) -> None:  # noqa: F811 — no-op sink
                     return
                 _can_stream = True
