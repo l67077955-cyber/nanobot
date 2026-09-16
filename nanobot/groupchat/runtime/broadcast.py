@@ -7,7 +7,9 @@ Agents can communicate with each other via chatroom_send/wait tools.
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json as _json
+import time
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Awaitable, Callable, Protocol, runtime_checkable
@@ -28,6 +30,58 @@ from nanobot.groupchat.runtime.tools.chatroom_tools import (
     trigger_realtime_interrupts as _trigger_realtime_interrupts,
 )
 from nanobot.groupchat.runtime.user_ingress import UserIngress
+
+# ── Poison-message guard (2026-09-16 review P2) ────────────────────────────
+# The 2026-09-13 anti-drop patch (94166f5f4) requeues a message whose
+# handling raised, so no user input is silently lost. Unconditional
+# requeue, however, spins forever on a poison message (the same failure
+# on every retry — a live-lock that also starves everything behind it
+# in the queue). Cap the retries, then dump the message to disk with
+# full evidence and move on.
+_REQUEUE_MAX_ATTEMPTS = 3
+
+
+def _msg_key(msg: str) -> str:
+    return hashlib.md5(msg.encode("utf-8", errors="replace")).hexdigest()[:16]
+
+
+def _poison_decision(
+    msg: str,
+    counts: dict[str, int],
+    *,
+    max_attempts: int = _REQUEUE_MAX_ATTEMPTS,
+) -> tuple[str, str]:
+    """Decide requeue-vs-drop for a message whose handling just failed.
+
+    Returns ``("requeue" | "drop", key)``; mutates ``counts`` (attempt
+    tally per content hash). Callers should clear the tally once the
+    message is finally handled.
+    """
+    key = _msg_key(msg)
+    n = counts.get(key, 0) + 1
+    if n >= max_attempts:
+        counts.pop(key, None)
+        return "drop", key
+    counts[key] = n
+    return "requeue", key
+
+
+def _dump_dropped_message(msg: str, log_dir: Path | None = None) -> Path | None:
+    """Persist a dropped poison message for post-mortem; never raises."""
+    try:
+        d = log_dir or (Path.home() / ".nanobot" / "logs")
+        d.mkdir(parents=True, exist_ok=True)
+        p = d / "dropped_user_messages.log"
+        with open(p, "a", encoding="utf-8") as f:
+            f.write(
+                f"{time.strftime('%Y-%m-%dT%H:%M:%S')} "
+                f"failed {_REQUEUE_MAX_ATTEMPTS}x — dropped: {msg!r}\n"
+            )
+        return p
+    except Exception as e:  # noqa: BLE001
+        logger.debug("broadcast: poison dump failed: {}", e)
+        return None
+
 
 # ── Tool-name → status state mapping ─────────────────────────
 _TOOL_STATE_MAP: dict[str, str] = {
@@ -1530,6 +1584,7 @@ async def broadcast_round(
     leader_end_sentinel: asyncio.Task | None = None
     _user_listener_running = True
     _join_listener_running = True
+    _requeue_counts: dict[str, int] = {}  # poison-retry tally per msg hash
 
     try:
         # ── User interjection listener ──
@@ -1563,13 +1618,29 @@ async def broadcast_round(
                 except Exception:
                     # Never let one bad message kill the listener silently —
                     # the 2026-09-13 14:42 incident lost a user message this
-                    # way (consumed, then no visible action, loop exited).
-                    logger.exception(
-                        "user_listener: handling message failed — requeuing: {}",
-                        msg[:60],
-                    )
-                    engine._input_queue.put_nowait(msg)
-                    await asyncio.sleep(1.0)
+                    # way. But unconditional requeue live-locks on a poison
+                    # message (same failure every retry); cap attempts, then
+                    # dump to disk with full evidence and move on.
+                    action, key = _poison_decision(msg, _requeue_counts)
+                    if action == "drop":
+                        logger.error(
+                            "user_listener: message failed {} attempts — dropping to disk: {!r}",
+                            _REQUEUE_MAX_ATTEMPTS,
+                            msg[:120],
+                        )
+                        _dump_dropped_message(msg)
+                        await asyncio.sleep(0.2)
+                    else:
+                        logger.exception(
+                            "user_listener: handling message failed — requeuing (attempt {}/{}): {}",
+                            _requeue_counts.get(key, 0),
+                            _REQUEUE_MAX_ATTEMPTS,
+                            msg[:60],
+                        )
+                        engine._input_queue.put_nowait(msg)
+                        await asyncio.sleep(1.0)
+                else:
+                    _requeue_counts.pop(_msg_key(msg), None)
 
 
         user_task = asyncio.create_task(_user_listener())
