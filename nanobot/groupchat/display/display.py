@@ -8,6 +8,8 @@ Design: clean Unicode, role-aware badges, compact and readable.
 
 from __future__ import annotations
 
+from nanobot.tools.memory_mcp import is_memory_write_tool, memory_tool
+
 
 def format_token_stats(
     prompt: int,
@@ -386,13 +388,10 @@ def tool_result_brief(
     elif tool_name == "list_dir":
         count = result.count("\n") if result else 0
         return f"    └ {count} entries"
-    elif tool_name == "memory_palace":
-        if result and "stored" in result:
-            return "    └ ✅ stored"
-        elif result and "search" in result.lower():
-            return "    └ 🔍 found"
-        else:
-            return f"    └ ({rlen:,}字)"
+    elif is_memory_write_tool(tool_name):
+        return "    └ ✅ stored"
+    elif tool_name == memory_tool("search"):
+        return "    └ 🔍 found"
     elif tool_name == "manage_agent":
         return "    └ ✅ done"
     elif tool_name == "transfer_credits":

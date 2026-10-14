@@ -2,6 +2,8 @@
 
 import re
 
+from nanobot.tools.memory_mcp import is_memory_write_tool
+
 # ── System Warning Templates ──────────────────────────────────
 
 SYSTEM_WARNINGS: dict[str, str] = {
@@ -32,7 +34,7 @@ SYSTEM_WARNINGS: dict[str, str] = {
         "禁止再调用工具，直接输出文字。"
     ),
     "delivery_gate_memory": (
-        "[⚠️ 交付门控拦截] 你将数据存入了 memory_palace 但未在文本回复中呈现。\n"
+        "[⚠️ 交付门控拦截] 你将数据存入了记忆宫殿但未在文本回复中呈现。\n"
         "用户看不到 memory 的内容——唯一交付通道是你的文本回复。\n"
         "请将存储的关键数据完整写入文本，不要只写'已存储'或'已完成'。"
     ),
@@ -102,12 +104,12 @@ def synthesis_quality_check(text: str, tools_used: list[str] | None = None) -> t
     if tools_used:
         tools_set = set(tools_used)
 
-        # 4a: memory_palace.store used (with visible=false) but synthesis is thin
-        #     Only gate when memory_palace is the ONLY substantive tool AND text lacks evidence
+        # 4a: data written to shared memory but synthesis is thin
+        #     Only gate when memory writes are the ONLY substantive tools AND text lacks evidence
         _data_tools = {"web_search", "web_fetch", "exec", "read_file"}
         has_other_data_tools = bool(tools_set & _data_tools)
-        if "memory_palace" in tools_set and not has_other_data_tools:
-            # memory_palace was used without any data-collection tools
+        if any(is_memory_write_tool(t) for t in tools_set) and not has_other_data_tools:
+            # memory was written without any data-collection tools
             # Check if text already contains concrete data (agent may have written it inline)
             has_inline_data = (
                 has_urls

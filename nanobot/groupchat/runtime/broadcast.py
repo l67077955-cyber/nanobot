@@ -310,8 +310,6 @@ class BroadcastOrchestrator:
 
     async def setup_tools_and_pools(self, spawn_fn: Callable[[str, int], asyncio.Task]) -> None:
         """Initialize all shared resources for the round."""
-        import os
-
         from nanobot.groupchat.runtime.tools.chatroom_tools import (
             CachedSearchTool,
             ChatroomSendTool,
@@ -325,7 +323,6 @@ class BroadcastOrchestrator:
             TransferCreditsTool,
             WaitTool,
         )
-        from nanobot.tools.memory_palace import MemoryPalaceTool
         from nanobot.tools.registry import ToolRegistry
 
         # Build per-agent capacity from ranks
@@ -377,10 +374,6 @@ class BroadcastOrchestrator:
         if self.leader_name:
             self.leader_gate = LeaderGate(self.leader_name)
 
-        _palace_path = self.gc_settings.get("memory_palace_path", str(Path.home() / ".nanobot" / "mempalace" / "palace"))
-        os.environ["MEMPALACE_PALACE_PATH"] = _palace_path
-        memory_palace = MemoryPalaceTool()
-
         for name in self.exec_agents:
             base_reg = self.engine._get_agent_registry(name)
             registry = ToolRegistry()
@@ -400,7 +393,6 @@ class BroadcastOrchestrator:
             wait_tool._send_tool = send_tool
             registry.register(send_tool)
             registry.register(wait_tool)
-            registry.register(memory_palace)
             registry.register(QuoteMessageTool(mailbox=self.mailbox))
             registry.register(ListMessagesTool(mailbox=self.mailbox))
             self.agent_tool_registries[name] = registry
@@ -425,6 +417,19 @@ class BroadcastOrchestrator:
             self.agent_tool_registries[self.leader_name].register(end_tool)
             self.agent_tool_registries[self.leader_name].register(transfer_tool)
             self.agent_tool_registries[self.leader_name].register(clear_ctx_tool)
+
+def always_on_tool_names(reg: Any, is_leader: bool) -> list[str]:
+    """Tools every broadcast agent gets regardless of its per-agent toggles:
+    chatroom tools, the shared memory (MemPalace MCP) tools present in ``reg``,
+    and the leader's orchestration tools."""
+    from nanobot.tools.memory_mcp import is_memory_tool  # noqa: PLC0415
+
+    names = ["chatroom_send", "wait"]
+    names += [tn for tn in reg.tool_names if is_memory_tool(tn)]
+    if is_leader:
+        names += ["manage_agent", "end_discussion", "transfer_credits", "clear_context"]
+    return names
+
 
 @dataclass
 class RoundResult:
@@ -607,6 +612,33 @@ async def broadcast_round(
             leader_on = engine.get_agent_enabled_tool_names(leader_name)
             leader_base_tools_str = f"（{', '.join(leader_on)}）" if leader_on else "（无基础工具）"
 
+            # Shared memory = the MemPalace MCP tools; only described when connected.
+            from nanobot.tools.memory_mcp import is_memory_tool, memory_tool  # noqa: PLC0415
+
+            if any(is_memory_tool(tn) for tn in agent_tool_registries[name].tool_names):
+                m_add, m_search = memory_tool("add_drawer"), memory_tool("search")
+                memory_section = (
+                    f"## 🧠 记忆宫殿（所有 Agent 共享，跨会话保留）\n"
+                    f"- {m_search}(query, limit=5, wing=?, room=?)\n"
+                    f"    语义检索记忆，返回原文和 drawer_id\n"
+                    f"- {m_add}(wing, room, content)\n"
+                    f"    原文存入记忆。wing=大类（如'用户'、'项目知识'），room=具体主题（如'偏好'）\n"
+                    f"- {memory_tool('list_wings')}() / {memory_tool('list_rooms')}(wing)\n"
+                    f"    查看已有的 wing / room，存入前先复用已有分类\n"
+                    f"- {memory_tool('delete_drawer')}(drawer_id)\n"
+                    f"    删除一条记忆\n\n"
+                )
+                memory_step_search = f"1. 先用 {m_search} 检索是否有相关历史记忆\n"
+                memory_step_store = (
+                    f"   b. 用 {m_add} 将关键结论写入记忆宫殿\n"
+                    f"      示例: {m_add}(wing='用户', room='偏好', content='用户偏好：...')\n"
+                    f"7. 完成记忆存入后，调用 end_discussion() 结束任务\n\n"
+                )
+            else:
+                memory_section = ""
+                memory_step_search = "1. 先回顾对话历史中已有的信息\n"
+                memory_step_store = "7. 调用 end_discussion() 结束任务\n\n"
+
             leader_hint = (
                 f"[Leader 模式 — 你是团队指挥官 👑]\n"
                 f"你是 {name}，负责分析问题、分配任务、整合结果。\n\n"
@@ -628,20 +660,11 @@ async def broadcast_round(
                 f"- end_discussion(reason): 结束讨论，进入最终总结\n"
                 f"- transfer_credits(from_agent, to_agent, amount): 划拨搜索额度\n"
                 f"- 你也拥有自己的基础工具{leader_base_tools_str}，可以自己做部分工作\n\n"
-                f"## 🧠 记忆宫殿（所有 Agent 共享）\n"
-                f"memory_palace 工具在本轮结束后仍然保留，下次启动自动加载。\n"
-                f"- memory_palace(action='store', content=..., wing=..., hall=..., room=...)\n"
-                f"    存入记忆。wing=大类（如'项目知识'），hall=子类（如'2026-04'），room=具体槽位\n"
-                f"- memory_palace(action='search', query=..., top_k=5)\n"
-                f"    关键词检索所有记忆，返回最相关的 top_k 条\n"
-                f"- memory_palace(action='list')\n"
-                f"    查看当前宫殿结构（Wing/Hall/Room 及记忆数量）\n"
-                f"- memory_palace(action='delete', wing=..., hall=..., room=...)\n"
-                f"    删除指定路径的记忆\n\n"
+                + memory_section +
                 f"每个 agent 有独立的搜索额度，详见下方的 [本轮状态汇总]。\n"
                 f"你可以用 transfer_credits 把闲置额度划拨给需要的队友。\n\n"
                 f"## 工作流程\n"
-                f"1. 先用 memory_palace(action='search') 检索是否有相关历史记忆\n"
+                + memory_step_search +
                 f"2. 分析问题，决定如何分工\n"
                 f"3. 用 chatroom_send 给队友分配具体任务（写清楚要做什么）\n"
                 f"   ⚠️ 只分配队友有工具能力完成的任务！无 web_search 的队友不要让他搜索\n"
@@ -655,9 +678,7 @@ async def broadcast_round(
                 f"      （讨论中确认的事实、数据、来源，用列表形式）\n\n"
                 f"      ## 备注\n"
                 f"      （可选：分歧说明、局限、后续建议）\n\n"
-                f"   b. 用 memory_palace(action='store') 将关键结论写入记忆宫殿\n"
-                f"      示例: memory_palace(action='store', content='用户偏好：...', wing='用户', hall='偏好', room='main')\n"
-                f"7. 完成记忆存入后，调用 end_discussion() 结束任务\n\n"
+                + memory_step_store +
                 f"## 关键规则\n"
                 f"- 发现队友空转或无法完成任务时：果断 end_discussion\n"
                 f"- 可以一次给多个队友同时发任务（并行工作）\n"
@@ -746,13 +767,9 @@ async def broadcast_round(
             _broadcast_result_max = 20_000
 
         reg = agent_tool_registries[name]
-        # Always include chatroom + broadcast-specific tools
-        broadcast_tool_names = ["chatroom_send", "wait", "memory_palace"]
-        if is_leader:
-            broadcast_tool_names.extend(["manage_agent", "end_discussion", "transfer_credits", "clear_context"])
         broadcast_defs = [
             t.to_schema() for t in [
-                reg.get(tn) for tn in broadcast_tool_names
+                reg.get(tn) for tn in always_on_tool_names(reg, is_leader)
             ]
             if t is not None
         ]
