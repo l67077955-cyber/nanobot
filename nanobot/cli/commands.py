@@ -382,12 +382,9 @@ def gateway(
 
     # Always create GroupChatEngine (unified prompt building)
     from nanobot.groupchat.runtime.engine import GroupChatEngine
-    gc_engine = GroupChatEngine(
-        config=config.groupchat,
-        provider=provider,
-        workspace=config.workspace_path,
-        web_search_config=config.tools.web.search,
-        web_proxy=config.tools.web.proxy or None,
+    gc_engine = GroupChatEngine.from_config(
+        config,
+        provider,
         cron_service=cron,
         send_outbound_fn=bus.publish_outbound,
     )

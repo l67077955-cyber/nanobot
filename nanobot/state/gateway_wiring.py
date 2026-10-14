@@ -90,9 +90,9 @@ def build_gateway_container(
         bus = c.get(MessageBus)
         provider = c.get(LLMProvider)
         cron = c.get(CronService)
-        return GroupChatEngine(
-            config=c.get(_ConfigMarker).groupchat,
-            provider=provider,
+        return GroupChatEngine.from_config(
+            c.get(_ConfigMarker),
+            provider,
             workspace=c.get(_WorkspaceMarker),
             cron_service=cron,
             send_outbound_fn=bus.publish_outbound,

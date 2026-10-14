@@ -83,11 +83,7 @@ def build_engine():
 
     cfg = load_config(None)
     provider = _make_provider(cfg)
-    engine = GroupChatEngine(
-        config=cfg.groupchat, provider=provider, workspace=cfg.workspace_path,
-        web_search_config=cfg.tools.web.search, web_proxy=cfg.tools.web.proxy or None,
-    )
-    return engine
+    return GroupChatEngine.from_config(cfg, provider)
 
 
 async def cmd_run(args) -> None:

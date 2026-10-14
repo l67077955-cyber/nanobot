@@ -48,6 +48,26 @@ class GroupChatEngine:
         "read_file", "write_file", "edit_file", "list_dir",
     ]
 
+    @classmethod
+    def from_config(cls, app_config: Any, provider: LLMProvider, **extra: Any) -> "GroupChatEngine":
+        """Build from the full app ``Config``.
+
+        The one place that maps config to engine kwargs: entry points that spelled
+        them out by hand dropped ``mcp_servers`` (b677a0101), which silently
+        disabled every MCP server. ``extra`` adds or overrides kwargs
+        (cron_service, send_outbound_fn, state_dir, workspace).
+        """
+        kwargs: dict[str, Any] = {
+            "config": app_config.groupchat,
+            "provider": provider,
+            "workspace": app_config.workspace_path,
+            "web_search_config": app_config.tools.web.search,
+            "web_proxy": app_config.tools.web.proxy or None,
+            "mcp_servers": app_config.tools.mcp_servers,
+        }
+        kwargs.update(extra)
+        return cls(**kwargs)
+
     def __init__(
         self,
         config: GroupChatConfig,
