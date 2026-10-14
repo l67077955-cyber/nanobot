@@ -79,7 +79,7 @@ async def run_round(engine, msg: str, quiet: float, max_wait: float) -> None:
 def build_engine():
     from nanobot.config.loader import load_config
     from nanobot.cli.commands import _make_provider
-    from nanobot.groupchat.orchestra.engine import GroupChatEngine
+    from nanobot.groupchat.runtime.engine import GroupChatEngine
 
     cfg = load_config(None)
     provider = _make_provider(cfg)
